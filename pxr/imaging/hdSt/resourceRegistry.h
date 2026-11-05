@@ -559,6 +559,14 @@ public:
         std::ostream &out,
         const HdStResourceRegistry& self);
 
+    /// Requests a new topology sweep after any active partial sweep.
+    HDST_API
+    void RequestTopologyGarbageCollection();
+
+    /// True while opt-in topology reclamation needs another render frame.
+    HDST_API
+    bool HasPendingTopologyGarbageCollection() const;
+
 protected:
     void _Commit() override;
     void _GarbageCollect() override;

@@ -4,6 +4,7 @@
 // Licensed under the terms set forth in the LICENSE.txt file available at
 // https://openusd.org/license.
 //
+#include "pxr/imaging/hdSt/performance.h"
 #include "pxr/imaging/hdSt/commandBuffer.h"
 #include "pxr/imaging/hdSt/debugCodes.h"
 #include "pxr/imaging/hdSt/geometricShader.h"
@@ -394,6 +395,7 @@ void
 HdStCommandBuffer::RebuildDrawBatchesIfNeeded(unsigned currentBatchesVersion,
     Hgi const *hgi)
 {
+    HdSt_Performance::Scope perfScope(HdSt_Performance::BatchValidate);
     HD_TRACE_FUNCTION();
 
     bool deepValidation = (currentBatchesVersion != _drawBatchesVersion);
@@ -438,6 +440,7 @@ HdStCommandBuffer::RebuildDrawBatchesIfNeeded(unsigned currentBatchesVersion,
                 if (results[i] ==
                     HdSt_DrawBatch::ValidationResult::RebuildBatch) {
                     
+                    HdSt_Performance::Scope rebuildScope(HdSt_Performance::BatchRebuild);
                     if (!_drawBatches[i]->Rebuild()) {
                         // If a batch rebuild fails, we fallback to rebuilding
                         // all draw batches. This can be improved in the future.
@@ -457,6 +460,7 @@ HdStCommandBuffer::RebuildDrawBatchesIfNeeded(unsigned currentBatchesVersion,
 void
 HdStCommandBuffer::_RebuildDrawBatches(Hgi const *hgi)
 {
+    HdSt_Performance::Scope perfScope(HdSt_Performance::BatchRebuildAll);
     HD_TRACE_FUNCTION();
 
     TF_DEBUG(HDST_DRAW_BATCH).Msg(
@@ -503,6 +507,8 @@ HdStCommandBuffer::_RebuildDrawBatches(Hgi const *hgi)
             usePipelineDrawBatch);
     }
 
+    HdSt_Performance::Add(HdSt_Performance::DrawBatches,_drawBatches.size());
+    HdSt_Performance::Add(HdSt_Performance::DrawItems,drawItems.size());
     TF_DEBUG(HDST_DRAW_BATCH).Msg(
         "   %lu draw batches created for %lu draw items\n", _drawBatches.size(),
         drawItems.size());

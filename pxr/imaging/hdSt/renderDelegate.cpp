@@ -4,6 +4,7 @@
 // Licensed under the terms set forth in the LICENSE.txt file available at
 // https://openusd.org/license.
 //
+#include "pxr/imaging/hdSt/performance.h"
 #include "pxr/pxr.h"
 #include "pxr/imaging/hdSt/renderDelegate.h"
 
@@ -588,6 +589,7 @@ HdStRenderDelegate::_CreateFallbackMaterialPrim()
 void
 HdStRenderDelegate::CommitResources(HdChangeTracker *tracker)
 {
+    HdSt_Performance::Scope perfScope(HdSt_Performance::Commit);
     TF_UNUSED(tracker);
 
     _ApplyTextureSettings();
@@ -605,7 +607,12 @@ HdStRenderDelegate::CommitResources(HdChangeTracker *tracker)
     _resourceRegistry->Commit();
 
     HdStRenderParam *stRenderParam = _renderParam.get();
-    if (stRenderParam->IsGarbageCollectionNeeded()) {
+    const bool requested = stRenderParam->IsGarbageCollectionNeeded();
+    if (requested) {
+        _resourceRegistry->RequestTopologyGarbageCollection();
+    }
+    if (requested ||
+        _resourceRegistry->HasPendingTopologyGarbageCollection()) {
         _resourceRegistry->GarbageCollect();
         stRenderParam->ClearGarbageCollectionNeeded();
     }

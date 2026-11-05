@@ -152,6 +152,7 @@ pxr_library(hdSt
         enums.h
 
     PRIVATE_CLASSES
+        performance
         assetUvTextureCpuData
         basisCurvesComputations
         basisCurvesShaderKey

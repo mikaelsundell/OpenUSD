@@ -4,6 +4,7 @@
 // Licensed under the terms set forth in the LICENSE.txt file available at
 // https://openusd.org/license.
 //
+#include "pxr/imaging/hdSt/performance.h"
 #include "pxr/base/work/loops.h"
 
 #include "pxr/imaging/hd/tokens.h"
@@ -36,6 +37,29 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 TF_DEFINE_ENV_SETTING(HDST_ENABLE_RESOURCE_INSTANCING, true,
                   "Enable instance registry deduplication of resource data");
+
+TF_DEFINE_ENV_SETTING(HDST_TOPOLOGY_GC_BUDGET_US, 0,
+    "Soft per-frame topology collection budget in microseconds; zero is eager");
+TF_DEFINE_ENV_SETTING(HDST_TOPOLOGY_GC_MAX_VISITS, 8192,
+    "Maximum topology entries visited per maintenance frame");
+TF_DEFINE_ENV_SETTING(HDST_TOPOLOGY_GC_MAX_ENTRIES, 1000000,
+    "Registry entry pressure threshold; above this use eager reclamation");
+
+namespace {
+// Bookkeeping uses the registry's existing extension point. No public class
+// layout changes or process-global registry-pointer maps are needed.
+class _TopologyGCState final : public HdResourceRegistry {
+public:
+    HdInstanceRegistry<HdSt_MeshTopologySharedPtr>::GarbageCollectionCursor cursor;
+    bool forceFull = false;
+};
+constexpr const char* _topologyStateKey = "__stTopoGC";
+int _TopologyBudget() {
+    static const int value = std::max(0, std::min(1000000,
+        TfGetEnvSetting(HDST_TOPOLOGY_GC_BUDGET_US)));
+    return value;
+}
+}
 
 TF_DEFINE_PRIVATE_TOKENS(
     _perfTokens,
@@ -144,11 +168,36 @@ HdStResourceRegistry::HdStResourceRegistry(Hgi * const hgi)
 
 HdStResourceRegistry::~HdStResourceRegistry()
 {
+    // Drain before Hgi collection and member destruction, preserving original
+    // dependency ordering even if the application closes during maintenance.
+    auto stateIt = _subResourceRegistries.find(_topologyStateKey);
+    if (stateIt != _subResourceRegistries.end()) {
+        auto *state = static_cast<_TopologyGCState*>(stateIt->second.get());
+        state->forceFull = true;
+        state->cursor.RequestRescan();
+    }
     // XXX Ideally all the HdInstanceRegistry would get destroy here and
     // they cleanup all GPU resources. Since that mechanism isn't in place
     // yet, we call GarbageCollect to emulate this behavior.
     GarbageCollect();
     _hgi->GarbageCollect();
+}
+
+void
+HdStResourceRegistry::RequestTopologyGarbageCollection()
+{
+    if (!_TopologyBudget() && !HdSt_Performance::Enabled()) return;
+    auto &entry = _subResourceRegistries[_topologyStateKey];
+    if (!entry) entry = std::make_unique<_TopologyGCState>();
+    static_cast<_TopologyGCState*>(entry.get())->cursor.RequestRescan();
+}
+
+bool
+HdStResourceRegistry::HasPendingTopologyGarbageCollection() const
+{
+    auto it = _subResourceRegistries.find(_topologyStateKey);
+    return it != _subResourceRegistries.end() &&
+        static_cast<_TopologyGCState*>(it->second.get())->cursor.active;
 }
 
 void HdStResourceRegistry::InvalidateShaderRegistry()
@@ -1121,6 +1170,7 @@ _DestroyComputePipeline(Hgi *hgi, HgiComputePipelineHandle *computePipeline)
 void
 HdStResourceRegistry::_GarbageCollect()
 {
+    HdSt_Performance::Scope perfScope(HdSt_Performance::ResourceGC);
     // The sequence in which we run garbage collection is significant.
     // We want to clean objects first which might be holding references
     // to other objects which will be subsequently cleaned up.
@@ -1133,7 +1183,27 @@ HdStResourceRegistry::_GarbageCollect()
     GarbageCollectBufferResources();
 
     {
-        size_t count = _meshTopologyRegistry.GarbageCollect();
+        size_t count;
+        if (_TopologyBudget() || HdSt_Performance::Enabled()) {
+            auto &entry = _subResourceRegistries[_topologyStateKey];
+            if (!entry) entry = std::make_unique<_TopologyGCState>();
+            auto *state = static_cast<_TopologyGCState*>(entry.get());
+            const size_t pressureLimit = static_cast<size_t>(std::max(1,
+                TfGetEnvSetting(HDST_TOPOLOGY_GC_MAX_ENTRIES)));
+            const bool forced = state->forceFull ||
+                _meshTopologyRegistry.size() > pressureLimit;
+            const int budget = forced ? 0 : _TopologyBudget();
+            const size_t visits = budget ? static_cast<size_t>(std::max(1,
+                TfGetEnvSetting(HDST_TOPOLOGY_GC_MAX_VISITS))) : 0;
+            const auto step = _meshTopologyRegistry.GarbageCollectStep(
+                &state->cursor, visits, std::chrono::microseconds(budget));
+            count = step.remaining;
+            HdSt_Performance::TopologyStep(this, step.visited, step.reclaimed,
+                step.remaining, step.pending, forced, step.eraseNs,
+                step.destroyNs, step.elapsedNs);
+        } else {
+            count = _meshTopologyRegistry.GarbageCollect();
+        }
         HD_PERF_COUNTER_SET(HdPerfTokens->instMeshTopology, count);
     }
 

@@ -35,6 +35,10 @@ public:
     HDST_API
     bool HasDrawItems(TfTokenVector const &renderTags) const;
 
+    /// Maintenance frames keep bounded reclamation progressing while idle.
+    HDST_API
+    bool IsConverged() const override;
+
 protected:
     virtual void _Execute(HdRenderPassStateSharedPtr const &renderPassState,
                           TfTokenVector const &renderTags) override;

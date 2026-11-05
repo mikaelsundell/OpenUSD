@@ -4,6 +4,7 @@
 // Licensed under the terms set forth in the LICENSE.txt file available at
 // https://openusd.org/license.
 //
+#include "pxr/imaging/hdSt/performance.h"
 #include "pxr/imaging/hdSt/binding.h"
 #include "pxr/imaging/hdSt/codeGen.h"
 #include "pxr/imaging/hdSt/commandBuffer.h"
@@ -448,6 +449,7 @@ HdSt_DrawBatch::_DrawingProgram::CompileShader(
         HdStResourceRegistrySharedPtr const &resourceRegistry,
         bool logCacheLookup /* = false */)
 {
+    HdSt_Performance::Scope perfScope(HdSt_Performance::ShaderPrepare);
     HD_TRACE_FUNCTION();
     HF_MALLOC_TAG_FUNCTION();
 
@@ -473,6 +475,7 @@ HdSt_DrawBatch::_DrawingProgram::CompileShader(
     
     // let resourcebinder resolve bindings and populate metadata
     // which is owned by codegen.
+    { HdSt_Performance::Scope bindingScope(HdSt_Performance::Bindings);
     _resourceBinder.ResolveBindings(drawItem,
                                     shaders,
                                     metaData.get(),
@@ -481,11 +484,19 @@ HdSt_DrawBatch::_DrawingProgram::CompileShader(
                                     customBindings,
                                     resourceRegistry->GetHgi()->
                                         GetCapabilities());
+    }
 
+    const auto setupBegin = HdSt_Performance::Enabled() ? HdSt_Performance::Now() : 0;
+    HdSt_Performance::DestructionTimer destruction(HdSt_Performance::CodegenDestroy);
     HdSt_CodeGen codeGen(_geometricShader, shaders,
                          drawItem->GetMaterialTag(), std::move(metaData));
 
-    HdStGLSLProgram::ID hash = codeGen.ComputeHash();
+    HdSt_Performance::Arm armDestruction(destruction);
+    if (setupBegin) HdSt_Performance::Add(HdSt_Performance::CodegenSetup,
+        1, HdSt_Performance::Now()-setupBegin);
+    HdStGLSLProgram::ID hash;
+    { HdSt_Performance::Scope hashScope(HdSt_Performance::CodegenHash);
+      hash = codeGen.ComputeHash(); }
 
     {
         // ask registry to see if there's already compiled program
@@ -493,6 +504,8 @@ HdSt_DrawBatch::_DrawingProgram::CompileShader(
                                 resourceRegistry->RegisterGLSLProgram(hash);
 
         if (programInstance.IsFirstInstance()) {
+            HdSt_Performance::Add(HdSt_Performance::ProgramMiss,1);
+            HdSt_Performance::Scope compileScope(HdSt_Performance::CompileLink);
 
             if (TfDebug::IsEnabled(HDST_LOG_DRAWING_SHADER_PROGRAM_MISSES) &&
                 logCacheLookup) {
@@ -510,6 +523,7 @@ HdSt_DrawBatch::_DrawingProgram::CompileShader(
                 programInstance.SetValue(glslProgram);
             }
         } else {
+            HdSt_Performance::Add(HdSt_Performance::ProgramHit,1);
             if (TfDebug::IsEnabled(HDST_LOG_DRAWING_SHADER_PROGRAM_HITS) &&
                 logCacheLookup) {
             

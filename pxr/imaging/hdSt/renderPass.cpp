@@ -4,6 +4,7 @@
 // Licensed under the terms set forth in the LICENSE.txt file available at
 // https://openusd.org/license.
 //
+#include "pxr/imaging/hdSt/performance.h"
 #include "pxr/imaging/hdSt/renderPass.h"
 
 #include "pxr/imaging/hdSt/debugCodes.h"
@@ -64,6 +65,14 @@ _GetGeomSubsetDrawItemsVersion(HdRenderIndex *renderIndex)
     return stRenderParam->GetGeomSubsetDrawItemsVersion();
 }
 
+bool
+HdSt_RenderPass::IsConverged() const
+{
+    return !std::static_pointer_cast<HdStResourceRegistry>(
+        GetRenderIndex()->GetRenderDelegate()->GetResourceRegistry())
+            ->HasPendingTopologyGarbageCollection();
+}
+
 HdSt_RenderPass::HdSt_RenderPass(HdRenderIndex *index,
                                  HdRprimCollection const &collection)
     : HdRenderPass(index, collection)
@@ -108,6 +117,7 @@ void
 HdSt_RenderPass::_Execute(HdRenderPassStateSharedPtr const &renderPassState,
                           TfTokenVector const& renderTags)
 {
+    HdSt_Performance::Scope perfScope(HdSt_Performance::RenderPass, true);
     HD_TRACE_FUNCTION();
     HF_MALLOC_TAG_FUNCTION();
 
