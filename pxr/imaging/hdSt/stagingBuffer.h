@@ -42,16 +42,21 @@ public:
     HDST_API
     void Deallocate();
 
-    /// Set the capacity for the staging buffer.  Only applied once first call
-    /// to StageCopy is called.
-    /// Cannot be called if there have already been calls to StageCopy for this
-    /// commit.
+    /**
+     * @brief Set the estimated upload size, capped to the staging batch limit.
+     *
+     * Allocation is deferred until StageCopy. Cannot be called with queued
+     * copies. HDST_MAX_STAGING_BUFFER_SIZE defaults to 64 MiB.
+     */
     HDST_API
     void Resize(size_t totalSize);
 
-    /// Submit a CPU to GPU copy operation to be added to the staging buffer.
-    /// The contents are memcpy'd over into the staging buffer during this call
-    /// and a GPU to GPU blit is queued up to do the final copy to destination.
+    /**
+     * @brief Queue a CPU to GPU copy using bounded staging or direct uploads.
+     *
+     * Full staging batches are flushed and completed before their memory is
+     * reused. Oversized direct uploads are split at the same batch limit.
+     */
     HDST_API
     void StageCopy(HgiBufferCpuToGpuOp const &copyOp);
 

@@ -11,7 +11,31 @@
 #include "pxr/imaging/hgi/capabilities.h"
 #include "pxr/imaging/hgi/hgi.h"
 
+#include "pxr/base/tf/envSetting.h"
+
+#include <algorithm>
+
 PXR_NAMESPACE_OPEN_SCOPE
+
+TF_DEFINE_ENV_SETTING(HDST_MAX_STAGING_BUFFER_SIZE, 64 * 1024 * 1024,
+    "Maximum bytes in a staging batch or direct buffer upload (1..1 GiB)");
+
+namespace {
+size_t
+_GetMaxStagingBufferSize()
+{
+    static const size_t limit = []() -> size_t {
+        const int configured = TfGetEnvSetting(HDST_MAX_STAGING_BUFFER_SIZE);
+        if (configured <= 0 || configured > 1024 * 1024 * 1024) {
+            TF_WARN("Invalid HDST_MAX_STAGING_BUFFER_SIZE; using 64 MiB");
+            return 64 * 1024 * 1024;
+        }
+        return static_cast<size_t>(configured);
+    }();
+    return limit;
+}
+} // anonymous namespace
+
 
 HdStStagingBuffer::HdStStagingBuffer(HdStResourceRegistry *resourceRegistry)
     : _resourceRegistry(resourceRegistry)
@@ -52,7 +76,7 @@ HdStStagingBuffer::Resize(size_t capacity)
         return;
     }
 
-    _capacity = capacity;
+    _capacity = std::min(capacity, _GetMaxStagingBufferSize());
 }
 
 void
@@ -71,11 +95,49 @@ HdStStagingBuffer::StageCopy(HgiBufferCpuToGpuOp const &copyOp)
     // The value of 'queueThreshold' is estimated (when is the extra memcpy
     // into the staging buffer slower than immediately issuing a gpu upload)
     static constexpr int queueThreshold = 512 * 1024;
-    if (!_isUma && copyOp.byteSize > queueThreshold) {
-        HgiBlitCmds* blitCmds = _resourceRegistry->GetGlobalBlitCmds();
-        blitCmds->CopyBufferCpuToGpu(copyOp);
+    const size_t maxBatchSize = _GetMaxStagingBufferSize();
+    if (_isUma && copyOp.byteSize > maxBatchSize) {
+        // UMA must keep CPU writes in owned staging memory until the GPU
+        // consumes them. Split oversized sources without writing directly
+        // into a final buffer that an earlier frame may still be reading.
+        for (size_t offset = 0; offset < copyOp.byteSize;) {
+            HgiBufferCpuToGpuOp chunk = copyOp;
+            chunk.sourceByteOffset += offset;
+            chunk.destinationByteOffset += offset;
+            chunk.byteSize = std::min(maxBatchSize, copyOp.byteSize - offset);
+            StageCopy(chunk);
+            offset += chunk.byteSize;
+        }
         return;
     }
+    if (!_isUma &&
+        (copyOp.byteSize > queueThreshold ||
+         copyOp.byteSize > maxBatchSize)) {
+        // Preserve the direct-upload fast path, but never issue a giant
+        // individual transfer. Sources stay alive until registry submission.
+        HgiBlitCmds* blitCmds = _resourceRegistry->GetGlobalBlitCmds();
+        for (size_t offset = 0; offset < copyOp.byteSize;) {
+            HgiBufferCpuToGpuOp chunk = copyOp;
+            chunk.sourceByteOffset += offset;
+            chunk.destinationByteOffset += offset;
+            chunk.byteSize = std::min(maxBatchSize, copyOp.byteSize - offset);
+            blitCmds->CopyBufferCpuToGpu(chunk);
+            offset += chunk.byteSize;
+        }
+        return;
+    }
+
+    // Resize receives an estimate. Resolved sources may require more space
+    // than estimated, so grow within the batch limit instead of dropping data.
+    const size_t requiredCapacity = std::max(_capacity, copyOp.byteSize);
+    if (_head > requiredCapacity - copyOp.byteSize ||
+        requiredCapacity != _capacity) {
+        Flush();
+        // Flush only records commands. Complete their execution before
+        // reusing CPU staging bytes or a UMA buffer consumed by those copies.
+        _resourceRegistry->SubmitBlitWork(HgiSubmitWaitTypeWaitUntilCompleted);
+    }
+    _capacity = requiredCapacity;
 
     HgiBufferHandle buffer = _handles[_activeSlot];
     constexpr size_t recoveryRatio = 4;
